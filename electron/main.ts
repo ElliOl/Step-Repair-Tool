@@ -63,8 +63,13 @@ ipcMain.handle('write-file', async (_event, filepath: string, content: Buffer) =
   return true
 })
 
-ipcMain.handle('analyse-step', async (_event, filepath: string, quality: string = 'standard') => {
-  return NativeBridge.analyseStep(filepath, quality)
+ipcMain.handle('analyse-step', async (_event, filepath: string, quality: string = 'fast') => {
+  const { BrowserWindow } = await import('electron')
+  const w = BrowserWindow.getAllWindows()[0]
+  const onLog = (msg: string) => {
+    if (w && !w.isDestroyed()) w.webContents.send('backend-log', msg)
+  }
+  return NativeBridge.analyseStep(filepath, quality, onLog)
 })
 
 ipcMain.handle('repair-step', async (

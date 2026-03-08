@@ -57,7 +57,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadingLogs: [],
   loadingProgress: 0,
   showEdges: true,
-  meshQuality: 'standard',
+  meshQuality: 'fast',
   upAxis: '+Y',
   showPartTree: false,
   partVisibility: {},

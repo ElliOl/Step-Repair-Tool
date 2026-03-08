@@ -82,9 +82,13 @@ function getAddon() {
   return addon
 }
 
-export async function analyseStep(filepath: string, quality: string = 'standard'): Promise<AnalyseResult> {
+export async function analyseStep(
+  filepath: string,
+  quality: string = 'fast',
+  onLog?: (msg: string) => void,
+): Promise<AnalyseResult> {
   const a = getAddon()
-  const raw = await a.analyseStep(filepath, quality)
+  const raw = await a.analyseStep(filepath, quality, onLog ?? null)
   return {
     namesFlagged: raw.namesFlagged,
     shellsSplit: raw.shellsSplit,

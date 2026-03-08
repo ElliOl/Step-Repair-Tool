@@ -107,17 +107,32 @@ Napi::Value GetVersion(const Napi::CallbackInfo& info) {
 
 class AnalyseStepWorker : public Napi::AsyncWorker {
 public:
-  AnalyseStepWorker(const Napi::Env& env, const std::string& filepath, const std::string& quality)
-    : Napi::AsyncWorker(env), deferred(Napi::Promise::Deferred::New(env)), filepath(filepath), quality(quality) {}
+  AnalyseStepWorker(const Napi::Env& env, const std::string& filepath, const std::string& quality, Napi::Function logCb)
+    : Napi::AsyncWorker(env), deferred(Napi::Promise::Deferred::New(env)), filepath(filepath), quality(quality) {
+    if (!logCb.IsEmpty() && !logCb.IsNull() && !logCb.IsUndefined()) {
+      tsfn = Napi::ThreadSafeFunction::New(env, logCb, "AnalyseLog", 0, 1);
+      hasCallback = true;
+    }
+  }
   void Execute() override {
     try {
+      if (hasCallback) {
+        g_viewer.SetLogCallback([this](const std::string& msg) {
+          tsfn.BlockingCall([msg](Napi::Env env, Napi::Function cb) { cb.Call({Napi::String::New(env, msg)}); });
+        });
+      }
       result = g_viewer.LoadStepMesh(filepath, quality);
+      g_viewer.SetLogCallback(nullptr);
       Handle(TDocStd_Document) doc = g_viewer.GetDocument(result.shape_id);
       Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
       namesFlagged = StepFixerNative::CountNamesToRepair(doc, shapeTool);
       shellsSplit = StepFixerNative::CountSolidsToSplit(doc, shapeTool);
       hoopsCompatFixes = StepFixerNative::CountHoopsCompatFixes(filepath);
-    } catch (const std::exception& e) { SetError(e.what()); }
+    } catch (const std::exception& e) {
+      g_viewer.SetLogCallback(nullptr);
+      SetError(e.what());
+    }
+    if (hasCallback) tsfn.Release();
   }
   void OnOK() override {
     Napi::Env env = Env();
@@ -128,23 +143,29 @@ public:
     MarshalLoadResult(env, result, out);
     deferred.Resolve(out);
   }
+  void OnError(const Napi::Error& err) override {
+    deferred.Reject(err.Value());
+  }
   Napi::Promise GetPromise() { return deferred.Promise(); }
 private:
   Napi::Promise::Deferred deferred;
   std::string filepath, quality;
   StepFixerNative::LoadResult result;
   int namesFlagged = 0, shellsSplit = 0, hoopsCompatFixes = 0;
+  Napi::ThreadSafeFunction tsfn;
+  bool hasCallback = false;
 };
 
 Napi::Value AnalyseStep(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsString()) {
-    Napi::TypeError::New(env, "Expected (filepath: string, quality?: string)").ThrowAsJavaScriptException();
+    Napi::TypeError::New(env, "Expected (filepath: string, quality?: string, logCallback?: Function)").ThrowAsJavaScriptException();
     return env.Null();
   }
   std::string filepath = info[0].As<Napi::String>().Utf8Value();
   std::string quality = info.Length() >= 2 && info[1].IsString() ? info[1].As<Napi::String>().Utf8Value() : "standard";
-  AnalyseStepWorker* w = new AnalyseStepWorker(env, filepath, quality);
+  Napi::Function logCb = info.Length() >= 3 && info[2].IsFunction() ? info[2].As<Napi::Function>() : Napi::Function();
+  AnalyseStepWorker* w = new AnalyseStepWorker(env, filepath, quality, logCb);
   w->Queue();
   return w->GetPromise();
 }

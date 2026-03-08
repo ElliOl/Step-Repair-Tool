@@ -6,6 +6,7 @@ Electron desktop app that repairs STEP files exported from Plasticity (via HOOPS
 
 1. **Part name repair** — PRODUCT entities with name `'0'` are replaced with the real part name from NAUO instance labels.
 2. **Disconnected shell split** — Solids that contain multiple geometrically disconnected face regions are split into separate solids.
+3. **HOOPS Exchange compatibility** — Per-face color overrides that cause partial MDGPR coverage are stripped; some readers (Creo, Keyshot) otherwise misinterpret this as a second geometric body and import the part as "2 sheets".
 
 ## Requirements
 
@@ -38,7 +39,7 @@ npm run dist   # or npm run pack for unpacked app
 
 - `electron/` — Main process, preload, native addon bridge
 - `src/` — React UI (Trace-style layout), CAD viewer (R3F), stores, hooks
-- `native/` — C++ addon (node-gyp): STEP read/write, name repair, shell split, tessellation for viewer
+- `native/` — C++ addon (node-gyp): STEP read/write, name repair, shell split, HOOPS compat fix, tessellation for viewer
 
 ## License
 

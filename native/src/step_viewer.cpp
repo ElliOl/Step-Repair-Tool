@@ -455,8 +455,10 @@ LoadResult StepViewer::LoadStepMesh(const std::string& filepath, const std::stri
   reader.SetColorMode(Standard_True);
   reader.SetNameMode(Standard_True);
   reader.SetLayerMode(Standard_True);
+  LOG_AND_STORE(pImpl, "Reading STEP file...");
   if (reader.ReadFile(filepath.c_str()) != IFSelect_RetDone)
     throw std::runtime_error("Failed to read STEP file: " + filepath);
+  LOG_AND_STORE(pImpl, "Parsing geometry...");
   if (!reader.Transfer(doc))
     throw std::runtime_error("Failed to transfer to XCAF");
 
@@ -657,21 +659,30 @@ LoadResult StepViewer::LoadStepMesh(const std::string& filepath, const std::stri
   }
 
   pImpl->part_trees[shape_id] = partTree;
-  LOG_AND_STORE(pImpl, "[StepViewer] Part tree: " << partTree.parts.size() << " parts");
+
+  // Count leaf parts (the ones that need tessellation)
+  int leafCount = 0;
+  for (const auto& p : partTree.parts)
+    if (!p.isAssembly && p.childIds.empty()) leafCount++;
+  LOG_AND_STORE(pImpl, "[StepViewer] Part tree: " << partTree.parts.size() << " parts (" << leafCount << " solids)");
 
   double linear = GetLinearDeflection(quality);
   double angular = GetAngularDeflection(quality);
+  LOG_AND_STORE(pImpl, "Tessellating " << leafCount << " solid" << (leafCount != 1 ? "s" : "") << "...");
   TessellateShape(shape, linear, angular);
 
   MeshData unifiedMesh;
   EdgeData unifiedEdges;
   uint32_t gv = 0, gi = 0, gev = 0;
   int totalFaces = 0, totalTri = 0, totalEdges = 0;
+  int partIdx = 0;
 
   for (PartNode& part : partTree.parts) {
     if (part.isAssembly || !part.childIds.empty()) continue;
     TopoDS_Shape partShape = partTree.shapes[part.id];
     if (partShape.IsNull()) continue;
+    partIdx++;
+    LOG_AND_STORE(pImpl, "[" << partIdx << "/" << leafCount << "] " << part.name);
     TessellateShape(partShape, linear, angular);
     MeshData partMesh;
     ExtractMesh(partShape, partMesh);
