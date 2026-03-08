@@ -12,7 +12,8 @@
     "preview": "electron-vite preview",
     "build:native": "cd native && npm run build",
     "pack": "npm run build && npm run build:native && electron-builder --dir",
-    "dist": "npm run build && npm run build:native && electron-builder"
+    "dist": "npm run build && npm run build:native && npm run build:icon && ./scripts/bundle-occt.sh && electron-builder",
+    "build:icon": "mkdir -p build && sips -s format png favicon.ico --out build/icon.png && sips -z 824 824 build/icon.png --out build/icon_824.png && sips -p 1024 1024 build/icon_824.png --out build/icon_1024.png && npx png2icons build/icon_1024.png build/icon -icns -i"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.1.2",
@@ -48,22 +49,25 @@
   },
   "build": {
     "appId": "com.stepfixer.app",
-    "productName": "StepFixer",
+    "productName": "StairRepair",
     "directories": {
       "output": "release"
     },
     "files": [
       "out/**/*",
-      "native/build/Release/step_fixer_native.node"
+      "native/build/Release/step_fixer_native.node",
+      "native/build/Release/occt/**/*"
     ],
     "asarUnpack": [
-      "native/build/Release/step_fixer_native.node"
+      "native/build/Release/step_fixer_native.node",
+      "native/build/Release/occt/**/*"
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
       "target": [
-        "dmg",
-        "zip"
+        { "target": "dmg", "arch": ["arm64"] },
+        { "target": "zip", "arch": ["arm64"] }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false

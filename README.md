@@ -1,4 +1,4 @@
-# StepFixer
+# StairRepair
 
 Electron desktop app that repairs STEP files exported from Plasticity (via HOOPS Exchange) so they import correctly into SolidWorks, Creo, Keyshot, and other professional CAD tools.
 
@@ -10,9 +10,12 @@ Electron desktop app that repairs STEP files exported from Plasticity (via HOOPS
 
 ## Requirements
 
+**For development:**
 - Node.js 18+
-- OpenCASCADE 7.8.1 at `$HOME/Libraries/opencascade/7.8.1` (or adjust `native/binding.gyp` and `electron/native-bridge.ts` for your install)
+- OpenCASCADE 7.8.1 at `$HOME/Libraries/opencascade/7.8.1` (or adjust `native/binding.gyp` for your install)
 - macOS 10.15+ (or Linux/Windows with matching OCCT build)
+
+**For the built release (DMG/ZIP):** No OCCT install needed — the app bundles OpenCASCADE 7.8.1.
 
 ## Setup
 

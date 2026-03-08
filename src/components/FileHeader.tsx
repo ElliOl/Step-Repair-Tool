@@ -64,7 +64,7 @@ export function FileHeader({ fileName }: FileHeaderProps) {
         className="flex items-center gap-2 shrink-0 px-3"
         style={{ paddingLeft: isMac ? '80px' : '12px' }}
       >
-        <span className="text-xs font-semibold text-text tracking-wide">StepFixer</span>
+        <span className="text-xs font-semibold text-text tracking-wide">StairRepair</span>
       </div>
 
       {/* Center — filename */}
