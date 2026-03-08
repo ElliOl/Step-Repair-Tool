@@ -28,11 +28,6 @@ export function useRepairActions() {
 
       try {
         const result = await window.electronAPI.analyseStep(filepath, quality)
-        addLoadingLog(`Analysing geometry…`)
-        setLoadingProgress(80)
-        addLoadingLog(`Building mesh…`)
-        setLoadingProgress(100)
-
         setFileStatus(filepath, 'ready', {
           namesFlagged: result.namesFlagged,
           shellsSplit: result.shellsSplit,
@@ -58,7 +53,7 @@ export function useRepairActions() {
         setLoading(false)
       }
     },
-    [setFileStatus, setModel, appendLog, setLoading, setLoadingStage, addLoadingLog, clearLoadingState, setLoadingProgress],
+    [setFileStatus, setModel, appendLog, setLoading, setLoadingStage, addLoadingLog, clearLoadingState],
   )
 
   const handleBrowse = React.useCallback(async () => {
@@ -77,6 +72,8 @@ export function useRepairActions() {
       clearLoadingState()
       setLoadingStage(`Repairing ${name}`)
       setLoading(true)
+      addLoadingLog('Reading file…')
+      addLoadingLog('Large files may take several minutes. Progress will appear as processing continues.')
       setFileStatus(filepath, 'repairing')
       appendLog(`[${new Date().toLocaleTimeString()}] ${name} → repairing…`)
 
@@ -86,7 +83,6 @@ export function useRepairActions() {
         const outputPath = `${dir}/${base}`
         const result = await window.electronAPI.repairStep(filepath, outputPath, options)
         if (result.success) {
-          setLoadingProgress(100)
           setFileStatus(filepath, 'done')
           setModel(
             {
@@ -110,7 +106,7 @@ export function useRepairActions() {
         setLoading(false)
       }
     },
-    [setLoading, setLoadingStage, clearLoadingState, setLoadingProgress, setFileStatus, setModel, appendLog],
+    [setLoading, setLoadingStage, clearLoadingState, setLoadingProgress, setFileStatus, setModel, appendLog, addLoadingLog],
   )
 
   const handleRepairAll = React.useCallback(

@@ -25,6 +25,7 @@
 #include "name_repair.h"
 #include "shell_split.h"
 #include "hoops_compat.h"
+#include "step_text_patch.h"
 #include <XCAFDoc_ColorTool.hxx>
 
 static StepFixerNative::StepViewer g_viewer;
@@ -193,55 +194,106 @@ public:
       g_viewer.SetLogCallback([this](const std::string& msg) {
         tsfn.BlockingCall([msg](Napi::Env env, Napi::Function cb) { cb.Call({Napi::String::New(env, msg)}); });
       });
-      Handle(TDocStd_Document) doc = new TDocStd_Document("MDTV-XCAF");
-      STEPCAFControl_Reader reader;
-      reader.SetColorMode(Standard_True);
-      reader.SetNameMode(Standard_True);
-      reader.SetLayerMode(Standard_True);
-      if (reader.ReadFile(filepath.c_str()) != IFSelect_RetDone)
-        throw std::runtime_error("Failed to read STEP file");
-      if (!reader.Transfer(doc))
-        throw std::runtime_error("Failed to transfer to XCAF");
-      Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
-      Handle(XCAFDoc_ColorTool) colorTool = XCAFDoc_DocumentTool::ColorTool(doc->Main());
 
-      // Build a map of TShape address → MSB entity name from the original file.
-      // RepairNames uses this to prefer the Plasticity body name (e.g. "Solid 262.001")
-      // stored in MANIFOLD_SOLID_BREP over the NAUO instance name, which for
-      // assembly-embedded files may be a file-path like "test slider3.stp".
-      std::unordered_map<Standard_Address, std::string> brepNameMap;
-      if (fixNames) {
-        try {
-          Handle(XSControl_WorkSession) WS = reader.Reader().WS();
-          Handle(Transfer_TransientProcess) TP = WS->TransferReader()->TransientProcess();
-          Handle(Interface_InterfaceModel) mdl = WS->Model();
-          Standard_Integer nb = mdl->NbEntities();
-          for (Standard_Integer i = 1; i <= nb; i++) {
-            Handle(Standard_Transient) ent = mdl->Value(i);
-            Handle(StepShape_ManifoldSolidBrep) msb =
-                Handle(StepShape_ManifoldSolidBrep)::DownCast(ent);
-            if (msb.IsNull()) continue;
-            Handle(TCollection_HAsciiString) bName = msb->Name();
-            if (bName.IsNull() || bName->IsEmpty()) continue;
-            std::string n = bName->ToCString();
-            if (n.empty() || n == "0" || n == " ") continue;
-            Handle(Transfer_Binder) binder = TP->Find(msb);
-            if (binder.IsNull()) continue;
-            Handle(TransferBRep_ShapeBinder) sb =
-                Handle(TransferBRep_ShapeBinder)::DownCast(binder);
-            if (sb.IsNull() || sb->Result().IsNull()) continue;
-            brepNameMap[(Standard_Address)sb->Result().TShape().get()] = n;
-          }
-        } catch (...) {}
+      if (!fixShells) {
+        // ── Text-level path ────────────────────────────────────────────────
+        // 1. Write the patched file using cached raw bytes (no disk re-read).
+        std::string cached = g_viewer.GetRawContent(filepath);
+        bool ok = cached.empty()
+            ? StepFixerNative::PatchStepFileText(filepath, outputPath, fixNames, fixHoopsCompat)
+            : StepFixerNative::PatchStepContent(cached, outputPath, fixNames, fixHoopsCompat);
+        if (!ok) throw std::runtime_error("Failed to patch STEP file");
+
+        // 2. Apply the same logical changes to the in-memory cached doc so the
+        //    viewer part tree reflects the repaired names / no face-color split.
+        //    Then rebuild the viewer result from the already-tessellated shapes —
+        //    no OCCT ReadFile / Transfer / BRepMesh needed.
+        Handle(TDocStd_Document) cachedDoc = g_viewer.GetDocumentForPath(filepath);
+        if (!cachedDoc.IsNull()) {
+          Handle(XCAFDoc_ShapeTool) shapeTool =
+              XCAFDoc_DocumentTool::ShapeTool(cachedDoc->Main());
+          Handle(XCAFDoc_ColorTool) colorTool =
+              XCAFDoc_DocumentTool::ColorTool(cachedDoc->Main());
+          // Use the cached brepNameMap so RepairNames prefers Plasticity body
+          // names from MANIFOLD_SOLID_BREP over NAUO instance names.  NAUO
+          // instance names may be a root filepath (e.g. "EVT for render.stp")
+          // when Plasticity embeds one file inside another, which would
+          // otherwise cause every part to be renamed to the root filename.
+          auto brepNameMap = g_viewer.GetBrepNameMap(filepath);
+          if (fixNames)       StepFixerNative::RepairNames(cachedDoc, shapeTool, brepNameMap);
+          if (fixHoopsCompat) StepFixerNative::StripPerFaceColors(cachedDoc, shapeTool, colorTool);
+          result = g_viewer.RebuildFromCachedShape(filepath, outputPath, "standard");
+        } else {
+          // Cache miss — fall back to reloading from disk.
+          result = g_viewer.LoadStepMesh(outputPath, "standard");
+        }
+        g_viewer.InvalidatePath(filepath);
+      } else {
+        // ── Full OCCT round-trip path ──────────────────────────────────────
+        // Required when fixShells is true (topology rebuild needs OCCT).
+        // Reuse the cached XCAF document from the analyse step if available
+        // to skip the expensive ReadFile + Transfer.
+        Handle(TDocStd_Document) doc = g_viewer.GetDocumentForPath(filepath);
+        bool usedCache = !doc.IsNull();
+        STEPCAFControl_Reader reader; // declared here so brepNameMap can use its WS
+        if (!usedCache) {
+          // Cache miss (e.g. first repair without a prior analyse): read from disk.
+          doc = new TDocStd_Document("MDTV-XCAF");
+          reader.SetColorMode(Standard_True);
+          reader.SetNameMode(Standard_True);
+          reader.SetLayerMode(Standard_True);
+          if (reader.ReadFile(filepath.c_str()) != IFSelect_RetDone)
+            throw std::runtime_error("Failed to read STEP file");
+          if (!reader.Transfer(doc))
+            throw std::runtime_error("Failed to transfer to XCAF");
+        }
+        Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+        Handle(XCAFDoc_ColorTool) colorTool = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+
+        // Build a map of TShape address → MSB entity name from the original file.
+        // RepairNames uses this to prefer the Plasticity body name (e.g. "Solid 262.001")
+        // stored in MANIFOLD_SOLID_BREP over the NAUO instance name, which for
+        // assembly-embedded files may be a file-path like "test slider3.stp".
+        // When we reused the cached doc we don't have a WorkSession; RepairNames
+        // gracefully falls back to NAUO instance names in that case.
+        std::unordered_map<Standard_Address, std::string> brepNameMap;
+        if (fixNames && !usedCache) {
+          try {
+            Handle(XSControl_WorkSession) WS = reader.Reader().WS();
+            Handle(Transfer_TransientProcess) TP = WS->TransferReader()->TransientProcess();
+            Handle(Interface_InterfaceModel) mdl = WS->Model();
+            Standard_Integer nb = mdl->NbEntities();
+            for (Standard_Integer i = 1; i <= nb; i++) {
+              Handle(Standard_Transient) ent = mdl->Value(i);
+              Handle(StepShape_ManifoldSolidBrep) msb =
+                  Handle(StepShape_ManifoldSolidBrep)::DownCast(ent);
+              if (msb.IsNull()) continue;
+              Handle(TCollection_HAsciiString) bName = msb->Name();
+              if (bName.IsNull() || bName->IsEmpty()) continue;
+              std::string n = bName->ToCString();
+              if (n.empty() || n == "0" || n == " ") continue;
+              Handle(Transfer_Binder) binder = TP->Find(msb);
+              if (binder.IsNull()) continue;
+              Handle(TransferBRep_ShapeBinder) sb =
+                  Handle(TransferBRep_ShapeBinder)::DownCast(binder);
+              if (sb.IsNull() || sb->Result().IsNull()) continue;
+              brepNameMap[(Standard_Address)sb->Result().TShape().get()] = n;
+            }
+          } catch (...) {}
+        }
+
+        if (fixNames)       StepFixerNative::RepairNames(doc, shapeTool, brepNameMap);
+        if (fixShells)      StepFixerNative::SplitDisconnectedShellsInDocument(doc, shapeTool);
+        if (fixHoopsCompat) StepFixerNative::StripPerFaceColors(doc, shapeTool, colorTool);
+        STEPCAFControl_Writer occtWriter;
+        if (!occtWriter.Perform(doc, outputPath.c_str()))
+          throw std::runtime_error("Failed to write STEP file");
+        // The cached doc has been mutated; drop the path cache so any subsequent
+        // repair re-reads from disk rather than using the already-modified doc.
+        g_viewer.InvalidatePath(filepath);
+        // Reload the OCCT-written file for the viewer (geometry may have changed).
+        result = g_viewer.LoadStepMesh(outputPath, "standard");
       }
-
-      if (fixNames) StepFixerNative::RepairNames(doc, shapeTool, brepNameMap);
-      if (fixShells) StepFixerNative::SplitDisconnectedShellsInDocument(doc, shapeTool);
-      if (fixHoopsCompat) StepFixerNative::StripPerFaceColors(doc, shapeTool, colorTool);
-      STEPCAFControl_Writer writer;
-      if (!writer.Perform(doc, outputPath.c_str()))
-        throw std::runtime_error("Failed to write STEP file");
-      result = g_viewer.LoadStepMesh(outputPath, "standard");
     } catch (const std::exception& e) { SetError(e.what()); }
     tsfn.Release();
   }

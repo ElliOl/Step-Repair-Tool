@@ -80,7 +80,9 @@ export function CADMesh({
 
     const geom = new THREE.BufferGeometry()
     geom.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3))
-    geom.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3))
+    // Normals are unit vectors from the C++ analytical pass — mark normalized so
+    // Three.js/WebGL don't re-normalize them in the vertex shader.
+    geom.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3, true))
     geom.setAttribute('color', new THREE.BufferAttribute(colorArray, 3))
     geom.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
     geom.computeBoundingBox()

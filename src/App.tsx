@@ -9,15 +9,41 @@ import { useAppStore } from './stores/appStore'
 import { useRepairActions } from './hooks/useRepairActions'
 import { convertPartsToFileTree, getAllPartIdsInSubtree } from './utils/partTreeUtils'
 
+// Maps each C++ log message to an overall 0-100% progress value.
+// Pipeline bands (calibrated to observed timing proportions):
+//   0-  3% : file I/O
+//   3- 72% : OCCT entity-graph transfer  (longest phase, ~70% of total time)
+//  72- 82% : parallel tessellation
+//  82- 99% : per-part mesh + edge extraction
+//    100%  : fully complete
 function parseProgressFromLog(log: string): number | null {
-  const bracketMatch = log.match(/\[(\d+)\/(\d+)\]/)
-  if (bracketMatch) {
-    const done = parseInt(bracketMatch[1], 10)
-    const total = parseInt(bracketMatch[2], 10)
-    if (total > 0) return Math.round((done / total) * 100)
+  // File I/O
+  if (/^Reading STEP file/.test(log)) return 2
+  if (/building B-rep topology/.test(log)) return 3
+
+  // Transfer: "Parsing geometry... N%" → map OCCT's 0-100 onto our 3-72 band
+  const geoM = log.match(/^Parsing geometry\.\.\.\s+(\d+)%/)
+  if (geoM) {
+    const pct = parseInt(geoM[1], 10)
+    return Math.round(3 + pct * 0.69)
   }
-  const percentMatch = log.match(/\b(\d{1,3})%/)
-  if (percentMatch) return parseInt(percentMatch[1], 10)
+
+  // Topology done → 72%, tessellation starts
+  if (/^Topology built in/.test(log)) return 72
+  if (/^Tessellating/.test(log)) return 74
+  if (/^Tessellation done in/.test(log)) return 82
+
+  // Per-part extraction: "[X/Y] name" anchored at line start → 82-99%
+  const partM = log.match(/^\[(\d+)\/(\d+)\]/)
+  if (partM) {
+    const done = parseInt(partM[1], 10)
+    const total = parseInt(partM[2], 10)
+    if (total > 0) return Math.round(82 + (done / total) * 17)
+  }
+
+  // Fully done
+  if (/\[StepViewer\] Done in/.test(log)) return 100
+
   return null
 }
 
@@ -56,7 +82,9 @@ export default function App() {
       if (useAppStore.getState().loading) {
         addLoadingLog(msg)
         const parsed = parseProgressFromLog(msg)
-        if (parsed !== null) setLoadingProgress(parsed)
+        if (parsed !== null && parsed > useAppStore.getState().loadingProgress) {
+          setLoadingProgress(parsed)
+        }
       }
     })
     return () => cleanup?.()

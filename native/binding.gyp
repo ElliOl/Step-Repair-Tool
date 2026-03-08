@@ -16,7 +16,8 @@
         "src/step_viewer.cpp",
         "src/name_repair.cpp",
         "src/shell_split.cpp",
-        "src/hoops_compat.cpp"
+        "src/hoops_compat.cpp",
+        "src/step_text_patch.cpp"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",

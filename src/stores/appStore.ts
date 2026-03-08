@@ -48,7 +48,7 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set, get) => ({
   files: [],
-  options: { fixNames: true, fixShells: true, fixHoopsCompat: true },
+  options: { fixNames: true, fixShells: false, fixHoopsCompat: true },
   log: [],
   model: null,
   currentFileName: null,

@@ -52,10 +52,16 @@
 #include <GeomAdaptor_Curve.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_XYZ.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Elips.hxx>
+#include <Geom_Surface.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <Message_ProgressIndicator.hxx>
+#include <Message_ProgressScope.hxx>
 #include <Standard_Version.hxx>
 
 #ifndef M_PI
@@ -63,6 +69,39 @@
 #endif
 
 namespace StepFixerNative {
+
+// ---------------------------------------------------------------------------
+// Progress indicator — streams percentage updates during reader.Transfer().
+// Show() is called by OCCT's internal progress machinery whenever it crosses
+// a sub-scope boundary. We throttle to ~2% increments to avoid flooding the
+// renderer with IPC messages.
+// ---------------------------------------------------------------------------
+class TransferProgressIndicator : public Message_ProgressIndicator {
+  DEFINE_STANDARD_RTTIEXT(TransferProgressIndicator, Message_ProgressIndicator)
+public:
+  using LogFn = std::function<void(const std::string&)>;
+
+  explicit TransferProgressIndicator(LogFn fn)
+    : myLog(std::move(fn)), myLastPct(-1) {}
+
+  Standard_Boolean UserBreak() override { return Standard_False; }
+
+  void Show(const Message_ProgressScope& /*theScope*/,
+            const Standard_Boolean isForced) override {
+    int pct = static_cast<int>(GetPosition() * 100.0);
+    if (pct > myLastPct + 1 || (isForced && pct > myLastPct)) {
+      myLastPct = pct;
+      std::ostringstream oss;
+      oss << "Parsing geometry... " << pct << "%";
+      myLog(oss.str());
+    }
+  }
+
+private:
+  LogFn myLog;
+  int myLastPct;
+};
+IMPLEMENT_STANDARD_RTTIEXT(TransferProgressIndicator, Message_ProgressIndicator)
 
 #define LOG_AND_STORE(impl, message) \
   do { \
@@ -110,10 +149,19 @@ static int EdgeSamples(const BRepAdaptor_Curve& curve_adaptor, const std::string
 }
 
 struct StepViewer::Impl {
-  std::unordered_map<std::string, TopoDS_Shape> shapes;
-  std::unordered_map<std::string, Handle(TDocStd_Document)> docs;
-  std::unordered_map<std::string, PartTreeData> part_trees;
-  std::unordered_map<std::string, LoadResult> load_cache;
+  std::unordered_map<std::string, TopoDS_Shape>              shapes;
+  std::unordered_map<std::string, Handle(TDocStd_Document)>  docs;
+  std::unordered_map<std::string, PartTreeData>              part_trees;
+  std::unordered_map<std::string, LoadResult>                load_cache;
+  // filepath-keyed caches — allow repair to reuse what analyse already loaded
+  std::unordered_map<std::string, std::string>               raw_by_path;      // filepath → raw bytes
+  std::unordered_map<std::string, std::string>               shape_id_by_path; // filepath → last shape_id
+  // shape_id-keyed MSB name map: TShape address → MANIFOLD_SOLID_BREP name.
+  // Built once during LoadStepMesh and reused by RepairNames in the text path
+  // so that Plasticity body names are preferred over NAUO instance names even
+  // when the WorkSession is no longer available.
+  std::unordered_map<std::string,
+      std::unordered_map<Standard_Address, std::string>>     brep_name_maps;
   int next_id = 1;
   std::vector<std::string> logs;
   LogCallback log_callback;
@@ -283,25 +331,42 @@ static void TessellateShape(const TopoDS_Shape& shape, double linear, double ang
   if (!mesher.IsDone()) throw std::runtime_error("Tessellation failed");
 }
 
-static void CalculateSmoothNormals(MeshData& mesh) {
-  size_t nv = mesh.positions.size() / 3;
-  mesh.normals.resize(mesh.positions.size(), 0.0f);
-  for (size_t i = 0; i < mesh.indices.size(); i += 3) {
-    uint32_t i0 = mesh.indices[i], i1 = mesh.indices[i + 1], i2 = mesh.indices[i + 2];
-    float v0x = mesh.positions[i0*3], v0y = mesh.positions[i0*3+1], v0z = mesh.positions[i0*3+2];
-    float v1x = mesh.positions[i1*3], v1y = mesh.positions[i1*3+1], v1z = mesh.positions[i1*3+2];
-    float v2x = mesh.positions[i2*3], v2y = mesh.positions[i2*3+1], v2z = mesh.positions[i2*3+2];
-    float nx = (v1y-v0y)*(v2z-v0z) - (v1z-v0z)*(v2y-v0y);
-    float ny = (v1z-v0z)*(v2x-v0x) - (v1x-v0x)*(v2z-v0z);
-    float nz = (v1x-v0x)*(v2y-v0y) - (v1y-v0y)*(v2x-v0x);
-    mesh.normals[i0*3]+=nx; mesh.normals[i0*3+1]+=ny; mesh.normals[i0*3+2]+=nz;
-    mesh.normals[i1*3]+=nx; mesh.normals[i1*3+1]+=ny; mesh.normals[i1*3+2]+=nz;
-    mesh.normals[i2*3]+=nx; mesh.normals[i2*3+1]+=ny; mesh.normals[i2*3+2]+=nz;
+// Compute smooth normals from triangle cross-products for a single face's vertices.
+// Used as fallback when UV/analytical normals are unavailable.
+static void ComputeFaceCrossNormals(
+  const Handle(Poly_Triangulation)& tri,
+  bool rev,
+  uint32_t baseVertex,          // index into mesh.positions/normals where this face starts
+  Standard_Integer nbNodes,
+  MeshData& mesh)
+{
+  std::vector<float> acc(nbNodes * 3, 0.0f);
+  Standard_Integer nbTri = tri->NbTriangles();
+  for (Standard_Integer t = 1; t <= nbTri; t++) {
+    Standard_Integer i0, i1, i2;
+    tri->Triangle(t).Get(i0, i1, i2);
+    i0--; i1--; i2--;  // 0-indexed
+    const float* p0 = &mesh.positions[(baseVertex + i0) * 3];
+    const float* p1 = &mesh.positions[(baseVertex + i1) * 3];
+    const float* p2 = &mesh.positions[(baseVertex + i2) * 3];
+    float ex1 = p1[0]-p0[0], ey1 = p1[1]-p0[1], ez1 = p1[2]-p0[2];
+    float ex2 = p2[0]-p0[0], ey2 = p2[1]-p0[1], ez2 = p2[2]-p0[2];
+    float nx = ey1*ez2 - ez1*ey2;
+    float ny = ez1*ex2 - ex1*ez2;
+    float nz = ex1*ey2 - ey1*ex2;
+    if (rev) { nx=-nx; ny=-ny; nz=-nz; }
+    acc[i0*3]+=nx; acc[i0*3+1]+=ny; acc[i0*3+2]+=nz;
+    acc[i1*3]+=nx; acc[i1*3+1]+=ny; acc[i1*3+2]+=nz;
+    acc[i2*3]+=nx; acc[i2*3+1]+=ny; acc[i2*3+2]+=nz;
   }
-  for (size_t i = 0; i < nv; i++) {
-    float nx = mesh.normals[i*3], ny = mesh.normals[i*3+1], nz = mesh.normals[i*3+2];
-    float len = std::sqrt(nx*nx+ny*ny+nz*nz);
-    if (len > 0) { mesh.normals[i*3]=nx/len; mesh.normals[i*3+1]=ny/len; mesh.normals[i*3+2]=nz/len; }
+  for (Standard_Integer i = 0; i < nbNodes; i++) {
+    float nx = acc[i*3], ny = acc[i*3+1], nz = acc[i*3+2];
+    float len = std::sqrt(nx*nx + ny*ny + nz*nz);
+    if (len > 1e-12f) { nx/=len; ny/=len; nz/=len; }
+    else              { nx=0.0f; ny=0.0f; nz=1.0f; }
+    mesh.normals[(baseVertex + i)*3]     = nx;
+    mesh.normals[(baseVertex + i)*3 + 1] = ny;
+    mesh.normals[(baseVertex + i)*3 + 2] = nz;
   }
 }
 
@@ -311,22 +376,73 @@ static void ExtractMesh(const TopoDS_Shape& shape, MeshData& mesh) {
   mesh.indices.clear();
   int face_count = 0, triangle_count = 0;
   uint32_t vertex_offset = 0;
+
   for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
     const TopoDS_Face& face = TopoDS::Face(exp.Current());
     face_count++;
+
+    // Triangulation + world transform
     TopLoc_Location loc;
     Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
     if (tri.IsNull()) continue;
     gp_Trsf tr = loc.Transformation();
+    bool rev = (face.Orientation() == TopAbs_REVERSED);
     Standard_Integer nbNodes = tri->NbNodes();
+
+    // --- Positions ---
     for (Standard_Integer i = 1; i <= nbNodes; i++) {
       gp_Pnt pt = tri->Node(i).Transformed(tr);
       mesh.positions.push_back((float)pt.X());
       mesh.positions.push_back((float)pt.Y());
       mesh.positions.push_back((float)pt.Z());
     }
+
+    // Pre-allocate normal slots for this face (filled below)
+    mesh.normals.resize(mesh.positions.size(), 0.0f);
+
+    // --- Analytical normals from parametric surface ---
+    // BRep_Tool::Surface(face, surfLoc) returns the surface in its own coordinate
+    // frame along with the location that places it in world space. Evaluating the
+    // normal in surface space and then transforming avoids the silent identity-
+    // location bug from the old BRep_Tool::Surface(face) call (no location arg).
+    bool analyticalOk = false;
+    if (tri->HasUVNodes()) {
+      TopLoc_Location surfLoc;
+      Handle(Geom_Surface) surface = BRep_Tool::Surface(face, surfLoc);
+      if (!surface.IsNull()) {
+        gp_Trsf surfTrsf = surfLoc.IsIdentity() ? gp_Trsf() : surfLoc.Transformation();
+        analyticalOk = true;
+        for (Standard_Integer i = 1; i <= nbNodes; i++) {
+          gp_Pnt2d uv = tri->UVNode(i);
+          GeomLProp_SLProps props(surface, uv.X(), uv.Y(), 1, 1e-6);
+          if (props.IsNormalDefined()) {
+            gp_Dir n = props.Normal();
+            // Transform from surface-local to world space
+            if (!surfLoc.IsIdentity()) n.Transform(surfTrsf);
+            if (rev) n.Reverse();
+            uint32_t idx = (vertex_offset + i - 1) * 3;
+            mesh.normals[idx]     = (float)n.X();
+            mesh.normals[idx + 1] = (float)n.Y();
+            mesh.normals[idx + 2] = (float)n.Z();
+          } else {
+            // Degenerate point (pole etc.) — mark for cross-product fallback
+            analyticalOk = false;
+            break;
+          }
+        }
+      }
+    }
+
+    // --- Fallback: per-face cross-product normals ---
+    // Used when UV nodes are absent, surface is null, or a degenerate parametric
+    // point was encountered. These are face-local (no cross-face averaging) so
+    // hard edges at B-rep face boundaries are preserved correctly.
+    if (!analyticalOk) {
+      ComputeFaceCrossNormals(tri, rev, vertex_offset, nbNodes, mesh);
+    }
+
+    // --- Indices ---
     Standard_Integer nbTri = tri->NbTriangles();
-    bool rev = (face.Orientation() == TopAbs_REVERSED);
     for (Standard_Integer i = 1; i <= nbTri; i++) {
       Standard_Integer n1, n2, n3;
       tri->Triangle(i).Get(n1, n2, n3);
@@ -337,9 +453,10 @@ static void ExtractMesh(const TopoDS_Shape& shape, MeshData& mesh) {
       else     { mesh.indices.push_back(n1); mesh.indices.push_back(n2); mesh.indices.push_back(n3); }
       triangle_count++;
     }
+
     vertex_offset += nbNodes;
   }
-  CalculateSmoothNormals(mesh);
+
   mesh.face_count = face_count;
   mesh.triangle_count = triangle_count;
 }
@@ -450,17 +567,48 @@ LoadResult StepViewer::LoadStepMesh(const std::string& filepath, const std::stri
   auto start = std::chrono::high_resolution_clock::now();
   LOG_AND_STORE(pImpl, "[StepViewer] Loading " << filepath << " (quality: " << quality << ")");
 
+  // Cache the raw file bytes now so the repair worker can reuse them without
+  // a second disk read.  We read the file ourselves first; OCCT's ReadFile will
+  // also read it, but the OS page cache means the second read is essentially free.
+  {
+    std::ifstream rawf(filepath, std::ios::binary);
+    if (rawf) {
+      pImpl->raw_by_path[filepath] = std::string(
+        (std::istreambuf_iterator<char>(rawf)),
+        std::istreambuf_iterator<char>());
+    }
+  }
+
   Handle(TDocStd_Document) doc = new TDocStd_Document("MDTV-XCAF");
   STEPCAFControl_Reader reader;
   reader.SetColorMode(Standard_True);
   reader.SetNameMode(Standard_True);
   reader.SetLayerMode(Standard_True);
+  auto t0 = std::chrono::high_resolution_clock::now();
   LOG_AND_STORE(pImpl, "Reading STEP file...");
   if (reader.ReadFile(filepath.c_str()) != IFSelect_RetDone)
     throw std::runtime_error("Failed to read STEP file: " + filepath);
-  LOG_AND_STORE(pImpl, "Parsing geometry...");
-  if (!reader.Transfer(doc))
-    throw std::runtime_error("Failed to transfer to XCAF");
+  {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::high_resolution_clock::now() - t0).count();
+    LOG_AND_STORE(pImpl, "File read in " << ms << "ms — building B-rep topology...");
+  }
+
+  // Stream incremental progress back to the renderer while OCCT resolves the
+  // full STEP entity graph (this is the longest single step for large files).
+  {
+    auto logFn = pImpl->log_callback;
+    Handle(TransferProgressIndicator) pi;
+    if (logFn) {
+      pi = new TransferProgressIndicator([logFn](const std::string& msg) { logFn(msg); });
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    if (!reader.Transfer(doc, logFn ? pi->Start() : Message_ProgressRange()))
+      throw std::runtime_error("Failed to transfer to XCAF");
+    auto ms1 = std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::high_resolution_clock::now() - t1).count();
+    LOG_AND_STORE(pImpl, "Topology built in " << ms1 << "ms");
+  }
 
   Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
   Handle(XCAFDoc_ColorTool) colorTool = XCAFDoc_DocumentTool::ColorTool(doc->Main());
@@ -486,8 +634,9 @@ LoadResult StepViewer::LoadStepMesh(const std::string& filepath, const std::stri
     throw std::runtime_error("Failed to get shape from XCAF");
 
   std::string shape_id = "shape_" + std::to_string(pImpl->next_id++);
-  pImpl->shapes[shape_id] = shape;
-  pImpl->docs[shape_id] = doc;
+  pImpl->shapes[shape_id]          = shape;
+  pImpl->docs[shape_id]            = doc;
+  pImpl->shape_id_by_path[filepath] = shape_id; // for repair path lookup
 
   PartTreeData partTree = ExtractPartTree(doc, shapeTool, colorTool);
 
@@ -612,6 +761,10 @@ LoadResult StepViewer::LoadStepMesh(const std::string& filepath, const std::stri
       }
     } catch (...) {}
 
+    // Cache for reuse by RepairNames in the text-level repair path
+    // (WorkSession is gone after LoadStepMesh returns).
+    pImpl->brep_name_maps[shape_id] = brepNameMap;
+
     if (!brepNameMap.empty()) {
       size_t brepOrigCount = partTree.parts.size();
       for (size_t i = 0; i < brepOrigCount; i++) {
@@ -669,7 +822,18 @@ LoadResult StepViewer::LoadStepMesh(const std::string& filepath, const std::stri
   double linear = GetLinearDeflection(quality);
   double angular = GetAngularDeflection(quality);
   LOG_AND_STORE(pImpl, "Tessellating " << leafCount << " solid" << (leafCount != 1 ? "s" : "") << "...");
-  TessellateShape(shape, linear, angular);
+  {
+    auto tTess = std::chrono::high_resolution_clock::now();
+    // Tessellate the whole compound in one parallel pass.
+    // BRepMesh_IncrementalMesh with isParallel=true distributes face work across
+    // all CPU cores. All per-part shapes share the same underlying TShape
+    // pointers, so they will find triangulation already present when we iterate
+    // below — no need to re-tessellate per part.
+    TessellateShape(shape, linear, angular);
+    auto msTess = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::high_resolution_clock::now() - tTess).count();
+    LOG_AND_STORE(pImpl, "Tessellation done in " << msTess << "ms — extracting mesh...");
+  }
 
   MeshData unifiedMesh;
   EdgeData unifiedEdges;
@@ -683,7 +847,9 @@ LoadResult StepViewer::LoadStepMesh(const std::string& filepath, const std::stri
     if (partShape.IsNull()) continue;
     partIdx++;
     LOG_AND_STORE(pImpl, "[" << partIdx << "/" << leafCount << "] " << part.name);
-    TessellateShape(partShape, linear, angular);
+    // No TessellateShape here — faces are already triangulated from the
+    // compound pass above. Calling it again per-part would create N
+    // BRepMesh_IncrementalMesh objects that immediately skip every face.
     MeshData partMesh;
     ExtractMesh(partShape, partMesh);
     EdgeData partEdges;
@@ -744,6 +910,148 @@ Handle(TDocStd_Document) StepViewer::GetDocument(const std::string& shape_id) {
   auto it = pImpl->docs.find(shape_id);
   if (it == pImpl->docs.end()) return nullptr;
   return it->second;
+}
+
+std::string StepViewer::GetRawContent(const std::string& filepath) const {
+  auto it = pImpl->raw_by_path.find(filepath);
+  return (it != pImpl->raw_by_path.end()) ? it->second : std::string{};
+}
+
+Handle(TDocStd_Document) StepViewer::GetDocumentForPath(const std::string& filepath) const {
+  auto idIt = pImpl->shape_id_by_path.find(filepath);
+  if (idIt == pImpl->shape_id_by_path.end()) return nullptr;
+  auto docIt = pImpl->docs.find(idIt->second);
+  return (docIt != pImpl->docs.end()) ? docIt->second : nullptr;
+}
+
+void StepViewer::InvalidatePath(const std::string& filepath) {
+  pImpl->raw_by_path.erase(filepath);
+  pImpl->shape_id_by_path.erase(filepath);
+}
+
+std::unordered_map<Standard_Address, std::string>
+StepViewer::GetBrepNameMap(const std::string& filepath) const {
+  auto idIt = pImpl->shape_id_by_path.find(filepath);
+  if (idIt == pImpl->shape_id_by_path.end())
+    return {};
+  auto mapIt = pImpl->brep_name_maps.find(idIt->second);
+  return (mapIt != pImpl->brep_name_maps.end()) ? mapIt->second
+                                                 : std::unordered_map<Standard_Address, std::string>{};
+}
+
+LoadResult StepViewer::RebuildFromCachedShape(
+    const std::string& origFilepath,
+    const std::string& outputFilepath,
+    const std::string& quality)
+{
+  // Look up the original shape and doc via the filepath cache
+  auto idIt = pImpl->shape_id_by_path.find(origFilepath);
+  if (idIt == pImpl->shape_id_by_path.end())
+    throw std::runtime_error("RebuildFromCachedShape: no cached shape for " + origFilepath);
+
+  const std::string& origId = idIt->second;
+
+  auto shapeIt = pImpl->shapes.find(origId);
+  if (shapeIt == pImpl->shapes.end())
+    throw std::runtime_error("RebuildFromCachedShape: shape not found for " + origId);
+  const TopoDS_Shape& topShape = shapeIt->second;
+
+  auto docIt = pImpl->docs.find(origId);
+  if (docIt == pImpl->docs.end())
+    throw std::runtime_error("RebuildFromCachedShape: doc not found for " + origId);
+  Handle(TDocStd_Document) doc = docIt->second;
+
+  Handle(XCAFDoc_ShapeTool) shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+  Handle(XCAFDoc_ColorTool) colorTool = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+
+  // Re-extract part tree from the modified doc (names already repaired, face
+  // colors already stripped by the caller).  No styledFaceAddrs split and no
+  // MSB sub-nodes needed — the repaired doc has correct names and no OVER_RIDING
+  // items, so the tree is already clean.
+  PartTreeData partTree = ExtractPartTree(doc, shapeTool, colorTool);
+
+  // Replace "root" with the output file's basename so the tree node shows the
+  // repaired file name rather than the generic XCAF root product name.
+  {
+    std::string filename = outputFilepath;
+    size_t sep = filename.find_last_of("/\\");
+    if (sep != std::string::npos) filename = filename.substr(sep + 1);
+    for (PartNode& part : partTree.parts)
+      if (part.parentId.empty() && part.name == "root")
+        part.name = filename;
+  }
+
+  std::string shape_id = "shape_" + std::to_string(pImpl->next_id++);
+  pImpl->shapes[shape_id]           = topShape;
+  pImpl->docs[shape_id]             = doc;
+  pImpl->part_trees[shape_id]       = partTree;
+  pImpl->shape_id_by_path[outputFilepath] = shape_id;
+
+  // Re-extract mesh and edges from the already-tessellated TShapes.
+  // BRepMesh_IncrementalMesh stored the triangulation on the TShape objects
+  // during the original LoadStepMesh call.  ExtractMesh/ExtractEdges simply
+  // read that stored data — no recomputation happens, so this is fast.
+  int leafCount = 0;
+  for (const auto& p : partTree.parts)
+    if (!p.isAssembly && p.childIds.empty()) leafCount++;
+
+  MeshData unifiedMesh;
+  EdgeData  unifiedEdges;
+  uint32_t  gv = 0, gi = 0, gev = 0;
+  int totalFaces = 0, totalTri = 0, totalEdges = 0;
+
+  for (PartNode& part : partTree.parts) {
+    if (part.isAssembly || !part.childIds.empty()) continue;
+    TopoDS_Shape partShape = partTree.shapes[part.id];
+    if (partShape.IsNull()) continue;
+
+    MeshData partMesh;
+    ExtractMesh(partShape, partMesh);
+    EdgeData partEdges;
+    ExtractEdges(partShape, partEdges, quality);
+
+    part.startVertex    = gv;
+    part.vertexCount    = (uint32_t)(partMesh.positions.size() / 3);
+    part.startIndex     = gi;
+    part.indexCount     = (uint32_t)partMesh.indices.size();
+    part.startEdgePoint = gev;
+    part.edgePointCount = (uint32_t)(partEdges.positions.size() / 3);
+    part.startEdgeIndex = (uint32_t)(unifiedEdges.indices.size() / 2);
+    part.edgeIndexCount = (uint32_t)(partEdges.indices.size() / 2);
+
+    unifiedMesh.positions.insert(unifiedMesh.positions.end(),
+        partMesh.positions.begin(), partMesh.positions.end());
+    unifiedMesh.normals.insert(unifiedMesh.normals.end(),
+        partMesh.normals.begin(), partMesh.normals.end());
+    for (uint32_t idx : partMesh.indices)
+      unifiedMesh.indices.push_back(idx + gv);
+
+    unifiedEdges.positions.insert(unifiedEdges.positions.end(),
+        partEdges.positions.begin(), partEdges.positions.end());
+    for (size_t i = 0; i < partEdges.indices.size(); i += 2) {
+      unifiedEdges.indices.push_back(partEdges.indices[i] + gev);
+      unifiedEdges.indices.push_back(partEdges.indices[i + 1]);
+    }
+
+    gv  += part.vertexCount;
+    gi  += part.indexCount;
+    gev += part.edgePointCount;
+    totalFaces  += partMesh.face_count;
+    totalTri    += partMesh.triangle_count;
+    totalEdges  += partEdges.edge_count;
+  }
+
+  unifiedMesh.face_count     = totalFaces;
+  unifiedMesh.triangle_count = totalTri;
+  unifiedEdges.edge_count    = totalEdges;
+  ComputeBoundingBox(topShape, unifiedMesh.bbox_min, unifiedMesh.bbox_max);
+
+  LoadResult res;
+  res.shape_id   = shape_id;
+  res.mesh       = std::move(unifiedMesh);
+  res.edges      = std::move(unifiedEdges);
+  res.part_tree  = partTree;
+  return res;
 }
 
 } // namespace StepFixerNative
