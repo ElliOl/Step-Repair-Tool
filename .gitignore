@@ -19,5 +19,5 @@ npm-debug.log*
 native/build/
 *.node
 
-# Test files (large STEP files - optional, remove if you want to track them)
-# test*.stp
+# Test STEP files
+test*.stp
