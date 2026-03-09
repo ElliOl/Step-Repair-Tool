@@ -137,6 +137,7 @@ function GizmoWithUpAxis({ upAxis }: { upAxis: UpAxis }) {
 interface CADViewerProps {
   model: ViewerModel | null
   showEdges?: boolean
+  showFaces?: boolean
   partVisibility?: Record<string, boolean>
   selectedPartIds?: Set<string>
   hoveredPartId?: string | null
@@ -148,10 +149,11 @@ interface CADViewerProps {
 export function CADViewer({
   model,
   showEdges = true,
+  showFaces = true,
   partVisibility,
   selectedPartIds,
   hoveredPartId,
-  upAxis = '+Y',
+  upAxis = '+Z',
   viewRotationX = 0,
   viewRotationZ = 0,
 }: CADViewerProps) {
@@ -186,13 +188,15 @@ export function CADViewer({
               viewRotationX={viewRotationX}
               viewRotationZ={viewRotationZ}
             >
-              <CADMesh
-                mesh={model.mesh}
-                parts={model.parts}
-                partVisibility={partVisibility}
-                selectedPartIds={selectedPartIds}
-                hoveredPartId={hoveredPartId}
-              />
+              {showFaces && (
+                <CADMesh
+                  mesh={model.mesh}
+                  parts={model.parts}
+                  partVisibility={partVisibility}
+                  selectedPartIds={selectedPartIds}
+                  hoveredPartId={hoveredPartId}
+                />
+              )}
               {showEdges && model.edges.positions.length > 0 && (
                 <CADEdges edges={model.edges} parts={model.parts} partVisibility={partVisibility} />
               )}

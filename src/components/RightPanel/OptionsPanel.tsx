@@ -45,16 +45,16 @@ export function OptionsPanel() {
           onCheckedChange={(v) => setOptions({ fixNames: v })}
         />
         <OptionRow
-          label="Split disconnected solids"
-          description="When a solid contains multiple unconnected face groups, split into separate solids"
-          checked={options.fixShells}
-          onCheckedChange={(v) => setOptions({ fixShells: v })}
-        />
-        <OptionRow
           label="Fix HOOPS Exchange compatibility"
           description="Strip per-face color overrides that can cause geometry import errors"
           checked={options.fixHoopsCompat}
           onCheckedChange={(v) => setOptions({ fixHoopsCompat: v })}
+        />
+        <OptionRow
+          label="Split disconnected solids"
+          description="When a solid contains multiple unconnected face groups, split into separate solids (slow)"
+          checked={options.fixShells}
+          onCheckedChange={(v) => setOptions({ fixShells: v })}
         />
       </div>
     </div>

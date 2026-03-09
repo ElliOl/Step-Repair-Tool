@@ -44,6 +44,7 @@ function ToggleRow({
 
 export function ViewerTab() {
   const showEdges = useAppStore((s) => s.showEdges)
+  const showFaces = useAppStore((s) => s.showFaces)
   const meshQuality = useAppStore((s) => s.meshQuality)
   const upAxis = useAppStore((s) => s.upAxis)
   const currentFile = useAppStore((s) => {
@@ -52,6 +53,7 @@ export function ViewerTab() {
     return f?.filepath ?? null
   })
   const setShowEdges = useAppStore((s) => s.setShowEdges)
+  const setShowFaces = useAppStore((s) => s.setShowFaces)
   const setMeshQuality = useAppStore((s) => s.setMeshQuality)
   const setUpAxis = useAppStore((s) => s.setUpAxis)
   const setModel = useAppStore((s) => s.setModel)
@@ -90,6 +92,7 @@ export function ViewerTab() {
       <div>
         <SectionLabel>Display</SectionLabel>
         <div className="space-y-3">
+          <ToggleRow label="Show faces" checked={showFaces} onCheckedChange={setShowFaces} />
           <ToggleRow label="Show edges" checked={showEdges} onCheckedChange={setShowEdges} />
         </div>
       </div>

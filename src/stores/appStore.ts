@@ -14,6 +14,7 @@ interface AppState {
   loadingProgress: number
   // Viewer display settings
   showEdges: boolean
+  showFaces: boolean
   meshQuality: 'fast' | 'standard' | 'fine'
   upAxis: '+Y' | '+Z'
   // Part tree UI
@@ -35,6 +36,7 @@ interface AppState {
   clearLoadingState: () => void
   setLoadingProgress: (progress: number) => void
   setShowEdges: (v: boolean) => void
+  setShowFaces: (v: boolean) => void
   setMeshQuality: (q: 'fast' | 'standard' | 'fine') => void
   setUpAxis: (axis: '+Y' | '+Z') => void
   // Part tree actions
@@ -57,8 +59,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadingLogs: [],
   loadingProgress: 0,
   showEdges: true,
+  showFaces: true,
   meshQuality: 'fast',
-  upAxis: '+Y',
+  upAxis: '+Z',
   showPartTree: false,
   partVisibility: {},
   selectedPartIds: new Set(),
@@ -123,6 +126,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setLoadingProgress: (progress) => set({ loadingProgress: progress }),
 
   setShowEdges: (v) => set({ showEdges: v }),
+
+  setShowFaces: (v) => set({ showFaces: v }),
 
   setMeshQuality: (q) => set({ meshQuality: q }),
 

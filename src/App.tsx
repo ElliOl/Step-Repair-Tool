@@ -52,6 +52,7 @@ export default function App() {
   const currentFileName = useAppStore((s) => s.currentFileName)
   const loading = useAppStore((s) => s.loading)
   const showEdges = useAppStore((s) => s.showEdges)
+  const showFaces = useAppStore((s) => s.showFaces)
   const appendLog = useAppStore((s) => s.appendLog)
   const addLoadingLog = useAppStore((s) => s.addLoadingLog)
   const setLoadingProgress = useAppStore((s) => s.setLoadingProgress)
@@ -166,6 +167,7 @@ export default function App() {
             <CADViewer
               model={model}
               showEdges={showEdges}
+              showFaces={showFaces}
               partVisibility={partVisibility}
               selectedPartIds={selectedPartIds}
               hoveredPartId={hoveredPartId}
