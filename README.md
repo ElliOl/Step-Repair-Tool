@@ -2,6 +2,8 @@
 
 Electron desktop app that repairs STEP files exported from Plasticity (via HOOPS Exchange) so they import correctly into SolidWorks, Creo, Keyshot, and other professional CAD tools.
 
+![StairRepair](STEPs-release.png)
+
 ## Fixes
 
 1. **Part name repair** — PRODUCT entities with name `'0'` are replaced with the real part name from NAUO instance labels.
