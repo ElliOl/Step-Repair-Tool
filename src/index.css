@@ -11,6 +11,14 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  input,
+  textarea,
+  [contenteditable="true"] {
+    user-select: text;
+    -webkit-user-select: text;
   }
   #root {
     width: 100vw;

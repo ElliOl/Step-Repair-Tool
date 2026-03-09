@@ -7,8 +7,6 @@ const DEFAULT_COLOR = new THREE.Color(0.72, 0.72, 0.74)
 const SELECT_COLOR = new THREE.Color(0.45, 0.65, 1.0)
 // Hover: warm white tint
 const HOVER_COLOR = new THREE.Color(0.85, 0.85, 0.95)
-// Hidden: match viewport background (#050505)
-const HIDDEN_COLOR = new THREE.Color(0.02, 0.02, 0.02)
 
 interface CADMeshProps {
   mesh: MeshData
@@ -36,25 +34,28 @@ export function CADMesh({
       colorArray[i * 3 + 2] = DEFAULT_COLOR.b
     }
 
-    // Paint per-part colors with interaction state applied
+    // Paint per-part colors with interaction state applied, skipping hidden parts
     const leafParts = parts.filter((p) => p.vertexCount > 0 && !p.isAssembly)
+    const hiddenIds = new Set<string>()
+
     for (const p of leafParts) {
+      const isHidden = partVisibility ? partVisibility[p.id] === false : false
+      if (isHidden) {
+        hiddenIds.add(p.id)
+        continue
+      }
+
       const hasColor = Array.isArray(p.color) && p.color !== null
       const baseR = hasColor ? (p.color as [number, number, number])[0] : DEFAULT_COLOR.r
       const baseG = hasColor ? (p.color as [number, number, number])[1] : DEFAULT_COLOR.g
       const baseB = hasColor ? (p.color as [number, number, number])[2] : DEFAULT_COLOR.b
 
-      const isHidden = partVisibility ? partVisibility[p.id] === false : false
       const isSelected = selectedPartIds?.has(p.id) ?? false
       const isHovered = hoveredPartId === p.id
 
       let r: number, g: number, b: number
 
-      if (isHidden) {
-        r = HIDDEN_COLOR.r
-        g = HIDDEN_COLOR.g
-        b = HIDDEN_COLOR.b
-      } else if (isSelected) {
+      if (isSelected) {
         // Blend original color 50% with selection tint
         r = baseR * 0.5 + SELECT_COLOR.r * 0.5
         g = baseG * 0.5 + SELECT_COLOR.g * 0.5
@@ -78,13 +79,27 @@ export function CADMesh({
       }
     }
 
+    // Build a filtered index buffer that excludes hidden parts' triangles entirely
+    let visibleIndexCount = 0
+    for (const p of leafParts) {
+      if (!hiddenIds.has(p.id)) visibleIndexCount += p.indexCount
+    }
+    const filteredIndices = new Uint32Array(visibleIndexCount)
+    let offset = 0
+    for (const p of leafParts) {
+      if (!hiddenIds.has(p.id)) {
+        filteredIndices.set(mesh.indices.subarray(p.startIndex, p.startIndex + p.indexCount), offset)
+        offset += p.indexCount
+      }
+    }
+
     const geom = new THREE.BufferGeometry()
     geom.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3))
     // Normals are unit vectors from the C++ analytical pass — mark normalized so
     // Three.js/WebGL don't re-normalize them in the vertex shader.
     geom.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3, true))
     geom.setAttribute('color', new THREE.BufferAttribute(colorArray, 3))
-    geom.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
+    geom.setIndex(new THREE.BufferAttribute(filteredIndices, 1))
     geom.computeBoundingBox()
     geom.computeBoundingSphere()
     return geom

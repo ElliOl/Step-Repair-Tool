@@ -194,7 +194,7 @@ export function CADViewer({
                 hoveredPartId={hoveredPartId}
               />
               {showEdges && model.edges.positions.length > 0 && (
-                <CADEdges edges={model.edges} />
+                <CADEdges edges={model.edges} parts={model.parts} partVisibility={partVisibility} />
               )}
             </SceneRotation>
           </Bounds>
